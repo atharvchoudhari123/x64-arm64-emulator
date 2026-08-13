@@ -1,0 +1,1507 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport"
+      content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Browser VM Bootloader</title>
+
+<style>
+:root{
+  color-scheme:dark;
+  --bg:#070a10;
+  --panel:#0e131d;
+  --panel2:#121927;
+  --line:#273247;
+  --text:#f4f7fb;
+  --muted:#9aa8bd;
+  --accent:#69a7ff;
+}
+
+*{box-sizing:border-box}
+
+html,body{
+  width:100%;
+  height:100%;
+  margin:0;
+  background:var(--bg);
+  color:var(--text);
+  font-family:Inter,ui-sans-serif,system-ui,-apple-system,
+  BlinkMacSystemFont,"Segoe UI",sans-serif;
+}
+
+body{
+  overflow:hidden;
+}
+
+.screen{
+  position:fixed;
+  inset:0;
+  display:none;
+}
+
+.screen.active{
+  display:flex;
+}
+
+/* =========================
+   LAUNCHER
+========================= */
+
+#launcher{
+  align-items:center;
+  justify-content:center;
+  padding:24px;
+  overflow:auto;
+}
+
+.shell{
+  width:min(920px,100%);
+  border:1px solid var(--line);
+  border-radius:22px;
+  background:linear-gradient(180deg,#111824,#0b1018);
+  box-shadow:0 24px 80px #0008;
+  padding:30px;
+}
+
+.brand{
+  display:flex;
+  align-items:center;
+  gap:14px;
+  margin-bottom:24px;
+}
+
+.logo{
+  width:48px;
+  height:48px;
+  border-radius:14px;
+  background:var(--accent);
+  color:#07101f;
+  display:grid;
+  place-items:center;
+  font-weight:900;
+  font-size:22px;
+}
+
+h1{
+  font-size:26px;
+  margin:0;
+}
+
+.sub{
+  color:var(--muted);
+  margin-top:4px;
+}
+
+.grid{
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:16px;
+}
+
+.card{
+  border:1px solid var(--line);
+  border-radius:16px;
+  background:var(--panel);
+  padding:18px;
+}
+
+.card h2{
+  font-size:15px;
+  margin:0 0 12px;
+}
+
+.arch{
+  display:flex;
+  gap:10px;
+}
+
+.arch button{
+  flex:1;
+  border:1px solid var(--line);
+  background:var(--panel2);
+  color:var(--text);
+  border-radius:12px;
+  padding:14px;
+  text-align:left;
+}
+
+.arch button.selected{
+  border-color:var(--accent);
+  box-shadow:0 0 0 1px var(--accent) inset;
+}
+
+.arch strong{
+  display:block;
+}
+
+.arch span{
+  font-size:12px;
+  color:var(--muted);
+}
+
+#drop{
+  border:1px dashed #46546d;
+  border-radius:14px;
+  padding:24px;
+  text-align:center;
+  background:#0b111b;
+  transition:.15s;
+}
+
+#drop.over{
+  border-color:var(--accent);
+  background:#101c2e;
+}
+
+#drop strong{
+  display:block;
+  margin-bottom:6px;
+}
+
+#isoName{
+  color:var(--muted);
+  font-size:13px;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+
+#file{
+  display:none;
+}
+
+.actions{
+  display:flex;
+  gap:10px;
+  margin-top:18px;
+}
+
+.primary,
+.secondary{
+  border-radius:12px;
+  padding:13px 17px;
+  border:1px solid var(--line);
+}
+
+.primary{
+  background:var(--accent);
+  color:#06101e;
+  border-color:transparent;
+  font-weight:800;
+  flex:1;
+}
+
+.secondary{
+  background:var(--panel2);
+  color:var(--text);
+}
+
+button{
+  cursor:pointer;
+  font:inherit;
+}
+
+button:disabled{
+  opacity:.45;
+  cursor:not-allowed;
+}
+
+.status{
+  margin-top:15px;
+  font-size:13px;
+  color:var(--muted);
+  min-height:20px;
+}
+
+.tips{
+  margin-top:18px;
+  color:var(--muted);
+  font-size:12px;
+  line-height:1.6;
+}
+
+/* =========================
+   BOOT SCREEN
+========================= */
+
+#boot{
+  align-items:center;
+  justify-content:center;
+  background:#05070b;
+}
+
+.bootbox{
+  width:min(560px,90vw);
+  text-align:center;
+}
+
+.spinner{
+  width:42px;
+  height:42px;
+  border:3px solid #263044;
+  border-top-color:var(--accent);
+  border-radius:50%;
+  margin:0 auto 20px;
+  animation:spin 1s linear infinite;
+}
+
+@keyframes spin{
+  to{transform:rotate(360deg)}
+}
+
+.boot-title{
+  font-size:22px;
+  font-weight:800;
+}
+
+.boot-text{
+  color:var(--muted);
+  margin:8px 0 20px;
+}
+
+.bar{
+  height:8px;
+  background:#151d2b;
+  border-radius:99px;
+  overflow:hidden;
+}
+
+.bar>i{
+  display:block;
+  width:0;
+  height:100%;
+  background:var(--accent);
+  transition:width .2s;
+}
+
+/* =========================
+   VM SCREEN
+========================= */
+
+#vm{
+  background:#000;
+  flex-direction:column;
+}
+
+#vmTop{
+  height:44px;
+  flex:none;
+  display:flex;
+  align-items:center;
+  gap:8px;
+  padding:6px 10px;
+  background:#0d121a;
+  border-bottom:1px solid #202a3a;
+}
+
+#vmTop .title{
+  font-size:13px;
+  margin-right:auto;
+  color:#cbd5e5;
+}
+
+#vmTop button{
+  border:1px solid #29354a;
+  background:#151d29;
+  color:#e5eaf2;
+  border-radius:8px;
+  padding:7px 10px;
+}
+
+#displayWrap{
+  position:relative;
+  flex:1;
+  min-height:0;
+  display:grid;
+  place-items:center;
+  background:#000;
+}
+
+#display{
+  max-width:100%;
+  max-height:100%;
+  outline:none;
+}
+
+#placeholder{
+  position:absolute;
+  color:#7f8da5;
+  text-align:center;
+  padding:20px;
+}
+
+#log{
+  position:absolute;
+  left:12px;
+  bottom:12px;
+  max-width:min(700px,90vw);
+  max-height:35vh;
+  overflow:auto;
+  padding:10px;
+  border-radius:10px;
+  background:#000b;
+  color:#9fb0c8;
+  font:12px ui-monospace,monospace;
+  display:none;
+  white-space:pre-wrap;
+}
+
+@media(max-width:700px){
+  .grid{
+    grid-template-columns:1fr;
+  }
+
+  .shell{
+    padding:20px;
+  }
+}
+</style>
+</head>
+
+<body>
+
+<!-- ============================================================
+     LAUNCHER
+============================================================ -->
+
+<section id="launcher" class="screen active">
+
+<main class="shell">
+
+<div class="brand">
+
+<div class="logo">
+VM
+</div>
+
+<div>
+<h1>Browser VM Bootloader</h1>
+<div class="sub">
+QEMU-Wasm • local ISO boot
+</div>
+</div>
+
+</div>
+
+
+<div class="grid">
+
+<!-- ARCHITECTURE -->
+
+<div class="card">
+
+<h2>Architecture</h2>
+
+<div class="arch">
+
+<button id="x64"
+        class="selected"
+        data-arch="x86_64">
+
+<strong>x86-64</strong>
+<span>QEMU x86_64-softmmu</span>
+
+</button>
+
+
+<button id="arm64"
+        data-arch="aarch64">
+
+<strong>ARM64</strong>
+<span>QEMU aarch64-softmmu</span>
+
+</button>
+
+</div>
+
+</div>
+
+
+<!-- ISO -->
+
+<div class="card">
+
+<h2>Boot media</h2>
+
+<div id="drop">
+
+<strong>Drop an ISO here</strong>
+
+<span>or</span>
+
+<div style="margin-top:10px">
+
+<button class="secondary"
+        id="choose">
+
+Choose ISO
+
+</button>
+
+</div>
+
+<div id="isoName"
+     style="margin-top:10px">
+
+No ISO selected
+
+</div>
+
+</div>
+
+<input id="file"
+       type="file"
+       accept=".iso,application/x-iso9660-image,application/octet-stream">
+
+</div>
+
+</div>
+
+
+<div class="actions">
+
+<button id="bootBtn"
+        class="primary"
+        disabled>
+
+Boot ISO
+
+</button>
+
+<button id="demoBtn"
+        class="secondary">
+
+Test UI
+
+</button>
+
+</div>
+
+
+<div id="status"
+     class="status">
+
+Select an ISO to begin.
+
+</div>
+
+
+<div class="tips">
+
+QEMU-Wasm files are expected inside
+<code>./qemu/</code>.
+
+For example:
+
+<code>
+qemu/qemu-system-x86_64.js
+</code>
+
+and its corresponding
+<code>.wasm</code> and supporting files.
+
+</div>
+
+</main>
+
+</section>
+
+
+<!-- ============================================================
+     BOOT SCREEN
+============================================================ -->
+
+<section id="boot"
+         class="screen">
+
+<div class="bootbox">
+
+<div class="spinner"></div>
+
+<div class="boot-title"
+     id="bootTitle">
+
+Preparing virtual machine…
+
+</div>
+
+<div class="boot-text"
+     id="bootText">
+
+Loading QEMU-Wasm
+
+</div>
+
+<div class="bar">
+
+<i id="progress"></i>
+
+</div>
+
+</div>
+
+</section>
+
+
+<!-- ============================================================
+     VM DISPLAY
+============================================================ -->
+
+<section id="vm"
+         class="screen">
+
+<div id="vmTop">
+
+<div class="title"
+     id="vmTitle">
+
+QEMU-Wasm VM
+
+</div>
+
+<button id="fullscreenBtn">
+Fullscreen
+</button>
+
+<button id="resetBtn">
+Reset
+</button>
+
+<button id="backBtn">
+Exit
+</button>
+
+</div>
+
+
+<div id="displayWrap">
+
+<canvas id="display"
+        tabindex="0">
+</canvas>
+
+<div id="placeholder">
+
+QEMU-Wasm display will appear here when
+the emulator adapter connects.
+
+</div>
+
+<pre id="log"></pre>
+
+</div>
+
+</section>
+
+
+<script>
+
+/* ============================================================
+   CONFIGURATION
+============================================================ */
+
+const QEMU_BASE = "./qemu/";
+
+const QEMU_X64_JS =
+      "qemu-system-x86_64.js";
+
+const QEMU_ARM64_JS =
+      "qemu-system-aarch64.js";
+
+
+/* ============================================================
+   GLOBAL STATE
+============================================================ */
+
+let selectedArch = "x86_64";
+
+let selectedISO = null;
+
+let adapter = null;
+
+
+/* ============================================================
+   HELPERS
+============================================================ */
+
+const $ = id =>
+    document.getElementById(id);
+
+
+function show(id){
+
+  document
+    .querySelectorAll(".screen")
+    .forEach(x =>
+      x.classList.remove("active")
+    );
+
+  $(id).classList.add("active");
+}
+
+
+function setStatus(text){
+
+  $("status").textContent = text;
+
+}
+
+
+function setProgress(
+  percentage,
+  title,
+  text
+){
+
+  $("progress").style.width =
+      Math.max(
+        0,
+        Math.min(100,percentage)
+      ) + "%";
+
+  if(title)
+    $("bootTitle").textContent = title;
+
+  if(text)
+    $("bootText").textContent = text;
+
+}
+
+
+function sleep(ms){
+
+  return new Promise(
+    resolve => setTimeout(resolve,ms)
+  );
+
+}
+
+
+function formatBytes(bytes){
+
+  if(bytes < 1024)
+    return bytes + " B";
+
+  if(bytes < 1024**2)
+    return (bytes/1024).toFixed(1)
+      + " KB";
+
+  if(bytes < 1024**3)
+    return (bytes/1024**2).toFixed(1)
+      + " MB";
+
+  return (bytes/1024**3).toFixed(2)
+      + " GB";
+}
+
+
+/* ============================================================
+   ARCHITECTURE
+============================================================ */
+
+$("x64").onclick = () => {
+
+  selectedArch = "x86_64";
+
+  $("x64")
+    .classList
+    .add("selected");
+
+  $("arm64")
+    .classList
+    .remove("selected");
+
+  setStatus(
+    "x86-64 selected."
+  );
+
+};
+
+
+$("arm64").onclick = () => {
+
+  selectedArch = "aarch64";
+
+  $("arm64")
+    .classList
+    .add("selected");
+
+  $("x64")
+    .classList
+    .remove("selected");
+
+  setStatus(
+    "ARM64 selected."
+  );
+
+};
+
+
+/* ============================================================
+   ISO PICKER
+============================================================ */
+
+$("choose").onclick = () => {
+
+  $("file").click();
+
+};
+
+
+$("file").onchange = event => {
+
+  const file =
+    event.target.files[0];
+
+  if(file)
+    acceptISO(file);
+
+};
+
+
+const drop =
+  $("drop");
+
+
+[
+  "dragenter",
+  "dragover"
+].forEach(eventName => {
+
+  drop.addEventListener(
+    eventName,
+    event => {
+
+      event.preventDefault();
+
+      drop.classList.add("over");
+
+    }
+  );
+
+});
+
+
+[
+  "dragleave",
+  "drop"
+].forEach(eventName => {
+
+  drop.addEventListener(
+    eventName,
+    event => {
+
+      event.preventDefault();
+
+      drop.classList.remove("over");
+
+    }
+  );
+
+});
+
+
+drop.addEventListener(
+  "drop",
+  event => {
+
+    const file =
+      event.dataTransfer.files[0];
+
+    if(file)
+      acceptISO(file);
+
+  }
+);
+
+
+function acceptISO(file){
+
+  if(!/\.iso$/i.test(file.name)){
+
+    setStatus(
+      "Please select an .iso file."
+    );
+
+    return;
+  }
+
+  selectedISO = file;
+
+  $("isoName").textContent =
+      file.name
+      + " • "
+      + formatBytes(file.size);
+
+  $("bootBtn").disabled = false;
+
+  setStatus(
+    "ISO ready. Click Boot ISO."
+  );
+
+}
+
+
+/* ============================================================
+   TEST MODE
+============================================================ */
+
+$("demoBtn").onclick =
+async () => {
+
+  show("boot");
+
+  for(
+    let i=0;
+    i<=100;
+    i+=5
+  ){
+
+    setProgress(
+      i,
+      "Bootloader test",
+      "Testing launcher interface…"
+    );
+
+    await sleep(35);
+
+  }
+
+  show("vm");
+
+  $("placeholder")
+    .textContent =
+      "UI test complete. Select an ISO and click Boot ISO to start QEMU-Wasm.";
+
+};
+
+
+/* ============================================================
+   BOOT
+============================================================ */
+
+$("bootBtn").onclick =
+boot;
+
+
+async function boot(){
+
+  if(!selectedISO)
+    return;
+
+  show("boot");
+
+  setProgress(
+    5,
+    "Preparing virtual machine…",
+    "Creating ISO object"
+  );
+
+  await sleep(100);
+
+
+  try{
+
+    /*
+     * Browser object URL for the selected ISO.
+     */
+
+    const isoURL =
+      URL.createObjectURL(
+        selectedISO
+      );
+
+
+    setProgress(
+      20,
+      "Preparing virtual machine…",
+      "Loading QEMU-Wasm runtime"
+    );
+
+
+    adapter =
+      new QEMUAdapter({
+
+        arch:selectedArch,
+
+        isoURL:isoURL,
+
+        isoFile:selectedISO,
+
+        canvas:$("display"),
+
+        onProgress:
+          (p,t) =>
+            setProgress(
+              p,
+              "Starting QEMU-Wasm…",
+              t
+            ),
+
+        onLog:
+          message =>
+            appendLog(message)
+
+      });
+
+
+    await adapter.load();
+
+
+    setProgress(
+      70,
+      "Starting virtual machine…",
+      "Building QEMU command line"
+    );
+
+
+    await adapter.start();
+
+
+    setProgress(
+      100,
+      "Virtual machine started",
+      "Waiting for display"
+    );
+
+
+    await sleep(300);
+
+
+    show("vm");
+
+
+    $("vmTitle").textContent =
+      "QEMU-Wasm • "
+      + selectedArch;
+
+
+    $("placeholder")
+      .style
+      .display = "none";
+
+
+    $("display").focus();
+
+
+  }catch(error){
+
+    console.error(error);
+
+    show("launcher");
+
+    setStatus(
+      "Boot failed: "
+      + (
+          error?.message
+          || error
+        )
+    );
+
+    alert(
+      "QEMU-Wasm could not start.\n\n"
+      +
+      (
+        error?.message
+        || error
+      )
+      +
+      "\n\n"
+      +
+      "Check that your QEMU-Wasm files are in ./qemu/."
+    );
+
+  }
+
+}
+
+
+/* ============================================================
+   LOGGING
+============================================================ */
+
+function appendLog(message){
+
+  const log =
+    $("log");
+
+  log.style.display =
+    "block";
+
+  log.textContent +=
+    String(message)
+    + "\n";
+
+  log.scrollTop =
+    log.scrollHeight;
+
+}
+
+
+/* ============================================================
+   QEMU-WASM ADAPTER
+============================================================ */
+
+/*
+
+   THIS IS THE IMPORTANT PART.
+
+   Different QEMU-Wasm builds expose different APIs.
+
+   This adapter supports:
+
+      window.QEMU_WASM.start()
+
+      window.QEMU.start()
+
+      Emscripten factory functions
+
+   If your particular QEMU build exposes a different API,
+   modify only this class.
+*/
+
+
+class QEMUAdapter{
+
+  constructor(options){
+
+    Object.assign(
+      this,
+      options
+    );
+
+    this.module = null;
+
+    this.process = null;
+
+  }
+
+
+  /* ----------------------------------------------------------
+     LOAD QEMU JAVASCRIPT
+  ---------------------------------------------------------- */
+
+  async load(){
+
+    const jsName =
+      this.arch === "x86_64"
+      ? QEMU_X64_JS
+      : QEMU_ARM64_JS;
+
+
+    const source =
+      QEMU_BASE + jsName;
+
+
+    this.onProgress?.(
+      35,
+      "Downloading emulator runtime…"
+    );
+
+
+    await this.loadScript(
+      source
+    );
+
+
+    this.onProgress?.(
+      50,
+      "QEMU-Wasm runtime loaded"
+    );
+
+  }
+
+
+  loadScript(source){
+
+    return new Promise(
+      (resolve,reject) => {
+
+        const existing =
+          document.querySelector(
+            `script[data-qemu="${source}"]`
+          );
+
+
+        if(existing){
+
+          resolve();
+
+          return;
+
+        }
+
+
+        const script =
+          document.createElement(
+            "script"
+          );
+
+
+        script.src =
+          source;
+
+        script.async =
+          true;
+
+        script.dataset.qemu =
+          source;
+
+
+        script.onload =
+          () => resolve();
+
+
+        script.onerror =
+          () =>
+            reject(
+              new Error(
+                "Could not load "
+                + source
+              )
+            );
+
+
+        document.head.appendChild(
+          script
+        );
+
+      }
+    );
+
+  }
+
+
+  /* ----------------------------------------------------------
+     START QEMU
+  ---------------------------------------------------------- */
+
+  async start(){
+
+    /*
+     * QEMU command line.
+     */
+
+    const args = [
+
+      "qemu-system-"
+        + this.arch,
+
+      "-m",
+      "1024",
+
+      "-machine",
+
+      this.arch === "x86_64"
+        ? "pc"
+        : "virt",
+
+      "-accel",
+      "tcg",
+
+      "-cdrom",
+      "/media/boot.iso",
+
+      "-boot",
+      "d",
+
+      "-serial",
+      "stdio"
+
+    ];
+
+
+    const options = {
+
+      args:args,
+
+      canvas:this.canvas,
+
+      files:[
+
+        {
+          name:"/media/boot.iso",
+          url:this.isoURL
+        }
+
+      ],
+
+      isoURL:this.isoURL,
+
+      isoFile:this.isoFile,
+
+      canvasId:"display",
+
+      print:this.onLog,
+
+      printErr:this.onLog
+
+    };
+
+
+    this.onLog?.(
+      "QEMU command: "
+      + args.join(" ")
+    );
+
+
+    /*
+     * API #1
+     */
+
+    if(
+      window.QEMU_WASM &&
+      typeof window.QEMU_WASM.start
+        === "function"
+    ){
+
+      this.process =
+        await window.QEMU_WASM.start(
+          options
+        );
+
+      return;
+
+    }
+
+
+    /*
+     * API #2
+     */
+
+    if(
+      window.QEMU &&
+      typeof window.QEMU.start
+        === "function"
+    ){
+
+      this.process =
+        await window.QEMU.start(
+          options
+        );
+
+      return;
+
+    }
+
+
+    /*
+     * API #3
+     *
+     * Common Emscripten factory names.
+     */
+
+    const factories = [
+
+      window.createQEMU,
+
+      window.createQemu,
+
+      window.QEMUFactory,
+
+      window.ModuleFactory
+
+    ].filter(
+      x =>
+        typeof x === "function"
+    );
+
+
+    if(factories.length){
+
+      this.module =
+        await factories[0]({
+
+          arguments:args,
+
+          canvas:this.canvas,
+
+          print:this.onLog,
+
+          printErr:this.onLog,
+
+          noInitialRun:false
+
+        });
+
+      return;
+
+    }
+
+
+    /*
+     * No known API.
+     */
+
+    throw new Error(
+
+      "QEMU-Wasm loaded, but no supported "
+      +
+      "start API was found. Connect your "
+      +
+      "generated QEMU module through "
+      +
+      "QEMUAdapter.start()."
+
+    );
+
+  }
+
+
+  /* ----------------------------------------------------------
+     RESET
+  ---------------------------------------------------------- */
+
+  async reset(){
+
+    if(
+      this.process &&
+      this.process.reset
+    ){
+
+      return this.process.reset();
+
+    }
+
+
+    if(
+      this.process &&
+      this.process.stop
+    ){
+
+      await this.process.stop();
+
+      return this.start();
+
+    }
+
+
+    location.reload();
+
+  }
+
+
+  /* ----------------------------------------------------------
+     STOP
+  ---------------------------------------------------------- */
+
+  async stop(){
+
+    try{
+
+      if(
+        this.process &&
+        this.process.stop
+      ){
+
+        await this.process.stop();
+
+      }
+
+      else if(
+        this.process &&
+        this.process.terminate
+      ){
+
+        this.process.terminate();
+
+      }
+
+    }catch(error){
+
+      console.warn(
+        "Unable to stop QEMU:",
+        error
+      );
+
+    }
+
+  }
+
+}
+
+
+/* ============================================================
+   VM CONTROLS
+============================================================ */
+
+$("fullscreenBtn").onclick =
+async () => {
+
+  const element =
+    $("displayWrap");
+
+
+  if(
+    !document.fullscreenElement
+  ){
+
+    await element
+      .requestFullscreen?.();
+
+  }else{
+
+    await document
+      .exitFullscreen?.();
+
+  }
+
+};
+
+
+$("resetBtn").onclick =
+async () => {
+
+  if(adapter)
+    await adapter.reset();
+
+};
+
+
+$("backBtn").onclick =
+async () => {
+
+  if(adapter)
+    await adapter.stop();
+
+
+  adapter = null;
+
+
+  $("placeholder")
+    .style
+    .display = "block";
+
+
+  $("log")
+    .style
+    .display = "none";
+
+
+  $("log").textContent =
+    "";
+
+
+  show("launcher");
+
+};
+
+
+window.addEventListener(
+  "beforeunload",
+  () => {
+
+    try{
+
+      adapter?.stop();
+
+    }catch{}
+
+  }
+);
+
+</script>
+
+</body>
+</html>
