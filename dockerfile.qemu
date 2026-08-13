@@ -1,0 +1,51 @@
+FROM emscripten/emsdk:3.1.50
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y \
+    git \
+    build-essential \
+    ninja-build \
+    meson \
+    pkg-config \
+    python3 \
+    python3-pip \
+    curl \
+    wget \
+    xz-utils \
+    ca-certificates \
+    libglib2.0-dev \
+    libpixman-1-dev \
+    libslirp-dev \
+    libcap-ng-dev \
+    libfdt-dev \
+    libaio-dev \
+    libusb-1.0-0-dev \
+    libcapstone-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+ARG QEMU_VERSION=9.2.3
+
+RUN git clone \
+    --depth 1 \
+    --branch v${QEMU_VERSION} \
+    https://github.com/qemu/qemu.git \
+    /build/qemu
+
+WORKDIR /build/qemu
+
+RUN mkdir -p /build/output
+
+COPY scripts/configure-qemu.sh /build/configure-qemu.sh
+
+RUN chmod +x /build/configure-qemu.sh && \
+    /build/configure-qemu.sh
+
+RUN emmake ninja -C build
+
+RUN mkdir -p /build/output/qemu && \
+    find build -type f \
+      \( -name "*.js" -o -name "*.wasm" -o -name "*.worker.js" -o -name "*.data" \) \
+      -exec cp {} /build/output/qemu/ \; || true
