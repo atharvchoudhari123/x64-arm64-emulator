@@ -11,11 +11,12 @@ RUN apt-get update && apt-get install -y \
     python3-pip \
     python3-setuptools \
     python3-wheel \
-    ca-certificates \
-    curl \
-    xz-utils \
-    bzip2 \
-    unzip \
+    meson \
+    gettext \
+    libglib2.0-dev \
+    libpixman-1-dev \
+    libslirp-dev \
+    libfdt-dev \
     && rm -rf /var/lib/apt/lists/*
 
 RUN python3 -m pip install --no-cache-dir \
@@ -34,9 +35,9 @@ RUN mkdir -p \
     /build/qemu-src \
     /build/qemu-build
 
-# ------------------------------------------------------------
+# ============================================================
 # GLIB
-# ------------------------------------------------------------
+# ============================================================
 
 RUN git clone \
     --depth 1 \
@@ -46,7 +47,17 @@ RUN git clone \
 
 WORKDIR /build/glib-src
 
-# Tell Meson that Emscripten is the host.
+# Download the GLib subprojects.
+RUN meson subprojects download
+
+# Remove libffi fallback because the bundled libffi version
+# does not support the Emscripten/wasm32 combination used here.
+RUN rm -rf \
+    subprojects/libffi \
+    subprojects/libffi-* \
+    subprojects/libffi-*
+
+# Create a clean Meson cross file.
 RUN cat > /build/glib-cross.txt <<'EOF'
 [binaries]
 c = 'emcc'
@@ -64,41 +75,24 @@ endian = 'little'
 
 [properties]
 needs_exe_wrapper = true
-has_function_printf = true
+skip_sanity_check = true
 EOF
 
-RUN meson subprojects download
-
-# ------------------------------------------------------------
-# PATCH GLIB'S BUNDLED LIBFFI
-#
-# GLib 2.76.6's bundled libffi does not recognize
-# Emscripten/wasm32 correctly.  We patch its Meson file so
-# it uses the generic wasm configuration.
-# ------------------------------------------------------------
-
+# Tell GLib not to use libffi.
 RUN python3 - <<'PY'
 from pathlib import Path
 
-p = Path("/build/glib-src/subprojects/libffi/meson.build")
+p = Path("/build/glib-src/meson.build")
 s = p.read_text()
 
-old = '''if host_system == 'emscripten'
-  if host_cpu_family == 'wasm32'
-    error('Unsupported pair: system "emscripten", cpu family "wasm32"')
-  endif
-endif
-'''
-
-if old in s:
-    s = s.replace(old, '')
+# Prevent the bundled libffi fallback from being used.
+s = s.replace(
+    "dependency('libffi',",
+    "dependency('libffi', required: false,"
+)
 
 p.write_text(s)
 PY
-
-# ------------------------------------------------------------
-# BUILD GLIB
-# ------------------------------------------------------------
 
 RUN rm -rf /build/glib-build && \
     meson setup /build/glib-build \
@@ -114,15 +108,17 @@ RUN rm -rf /build/glib-build && \
       -Dlibmount=disabled \
       -Dselinux=disabled \
       -Dxattr=false \
-      -Dlibelf=disabled
+      -Dlibelf=disabled \
+      -Dgio_tests=false \
+      -Dsystemtap=false
 
-RUN ninja -C /build/glib-build
+RUN meson compile -C /build/glib-build
 
-RUN ninja -C /build/glib-build install
+RUN meson install -C /build/glib-build
 
-# ------------------------------------------------------------
+# ============================================================
 # QEMU
-# ------------------------------------------------------------
+# ============================================================
 
 WORKDIR /build
 
@@ -134,120 +130,130 @@ RUN git clone \
 
 WORKDIR /build/qemu-src
 
-# ------------------------------------------------------------
-# QEMU CONFIGURATION
-# ------------------------------------------------------------
+# Initialize only the QEMU submodules that are needed.
+RUN git submodule update --init --recursive
 
-RUN ./configure \
+# ============================================================
+# QEMU CONFIGURE
+# ============================================================
+
+RUN mkdir -p /build/qemu-build
+
+RUN /build/qemu-src/configure \
     --static \
     --target-list=x86_64-softmmu \
     --cpu=wasm32 \
-    --disable-system \
-    --enable-system \
-    --disable-user \
-    --disable-linux-user \
-    --disable-bsd-user \
-    --disable-docs \
-    --disable-tools \
-    --disable-plugins \
-    --disable-debug-info \
+    --cc=emcc \
+    --cxx=em++ \
+    --ar=emar \
+    --ranlib=emranlib \
+    --strip=emstrip \
+    --prefix=/build/output/qemu \
     --disable-werror \
+    --disable-docs \
     --disable-gtk \
     --disable-sdl \
-    --disable-opengl \
-    --disable-vte \
-    --disable-curses \
-    --disable-spice \
     --disable-vnc \
-    --disable-slirp \
+    --disable-curl \
     --disable-libssh \
-    --disable-libnfs \
-    --disable-libiscsi \
-    --disable-libusb \
-    --disable-usb-redir \
-    --disable-virglrenderer \
-    --disable-cap-ng \
-    --disable-seccomp \
-    --disable-libcap-ng \
+    --disable-opengl \
     --disable-pie \
+    --disable-slirp \
+    --disable-capstone \
     --disable-fdt \
-    --disable-zstd \
     --disable-bzip2 \
     --disable-lzo \
     --disable-snappy \
-    --disable-coroutine-pool \
-    --disable-coroutine-tsan \
-    --disable-kvm \
-    --disable-hvf \
-    --disable-whpx \
-    --disable-tcg-interpreter \
-    --enable-tcg \
-    --enable-fdt=internal \
-    --with-sysroot=/build/sysroot
-
-# ------------------------------------------------------------
-# BUILD QEMU-WASM
-# ------------------------------------------------------------
-
-RUN emconfigure ./configure \
-    --static \
-    --target-list=x86_64-softmmu \
-    --cpu=wasm32 \
-    --disable-docs \
-    --disable-tools \
-    --disable-plugins \
-    --disable-debug-info \
-    --disable-werror \
-    --disable-gtk \
-    --disable-sdl \
-    --disable-opengl \
-    --disable-vte \
-    --disable-curses \
-    --disable-spice \
-    --disable-vnc \
-    --disable-slirp \
-    --disable-libssh \
-    --disable-libnfs \
-    --disable-libiscsi \
-    --disable-libusb \
-    --disable-usb-redir \
-    --disable-virglrenderer \
-    --disable-cap-ng \
     --disable-seccomp \
-    --disable-libcap-ng \
-    --disable-pie \
+    --disable-xen \
     --disable-kvm \
     --disable-hvf \
     --disable-whpx \
-    --disable-tcg-interpreter \
+    --disable-netmap \
+    --disable-vde \
+    --disable-brlapi \
+    --disable-usb-redir \
+    --disable-libusb \
+    --disable-spice \
+    --disable-rdma \
+    --disable-png \
+    --disable-vte \
+    --disable-virglrenderer \
+    --disable-libiscsi \
+    --disable-libnfs \
+    --disable-libpmem \
+    --disable-libdaxctl \
+    --disable-libudev \
+    --disable-bpf \
+    --disable-bpf-syscall \
+    --disable-fuse \
+    --disable-fuse-lseek \
+    --disable-numa \
+    --disable-linux-aio \
+    --disable-linux-io-uring \
+    --disable-io-uring \
+    --disable-libdw \
+    --disable-libcap-ng \
+    --disable-keyring \
+    --disable-gnutls \
+    --disable-nettle \
+    --disable-auth-pam \
+    --disable-rbd \
+    --disable-libusb \
+    --disable-pvrdma \
+    --disable-coroutine-pool \
+    --disable-membarrier \
+    --disable-fdt \
     --enable-tcg \
-    --enable-fdt=internal \
-    --with-sysroot=/build/sysroot
+    --enable-system
 
-RUN emmake ninja -C build
+# ============================================================
+# BUILD QEMU
+# ============================================================
 
-# ------------------------------------------------------------
-# COPY OUTPUT
-# ------------------------------------------------------------
+RUN emmake make -j2
 
-RUN mkdir -p /build/output/qemu && \
-    find /build/qemu-src/build \
-      -type f \
-      \( -name 'qemu-system-x86_64' \
-      -o -name '*.wasm' \
-      -o -name '*.js' \
-      -o -name '*.worker.js' \) \
-      -exec cp -v {} /build/output/qemu/ \;
+# ============================================================
+# INSTALL
+# ============================================================
 
-# ------------------------------------------------------------
-# FINAL OUTPUT
-# ------------------------------------------------------------
+RUN emmake make install
 
-WORKDIR /build/output
+# ============================================================
+# WEBASSEMBLY LINK
+# ============================================================
+
+WORKDIR /build/output/qemu
+
+RUN if [ -f qemu-system-x86_64 ]; then \
+      emcc \
+        qemu-system-x86_64 \
+        -o qemu-system-x86_64.html \
+        -sWASM_BIGINT \
+        -sALLOW_MEMORY_GROWTH=1 \
+        -sINITIAL_MEMORY=512MB \
+        -sMAXIMUM_MEMORY=2300MB \
+        -sSTACK_SIZE=8MB \
+        -sMODULARIZE=1 \
+        -sEXPORT_ES6=1 \
+        -sENVIRONMENT=web,worker \
+        -sFORCE_FILESYSTEM=1 \
+        -sEXIT_RUNTIME=0 \
+        -sASSERTIONS=1 \
+        -sNO_EXIT_RUNTIME=1 \
+        -sPTHREAD_POOL_SIZE=4 \
+        -sPROXY_TO_PTHREAD=1 \
+        -O2; \
+    fi
+
+# ============================================================
+# VERIFY
+# ============================================================
 
 RUN echo "========================================" && \
-    echo " QEMU-WASM BUILD COMPLETE" && \
+    echo " QEMU-WASM BUILD OUTPUT" && \
     echo "========================================" && \
-    find /build/output/qemu -maxdepth 1 -type f -print
+    find /build/output/qemu -maxdepth 2 -type f -print && \
+    echo "========================================"
 
 CMD ["bash"]
