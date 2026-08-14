@@ -2,10 +2,6 @@ FROM emscripten/emsdk:3.1.50
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# ============================================================
-# Browser VM - QEMU-Wasm Builder
-# ============================================================
-
 RUN apt-get update && apt-get install -y \
     git \
     build-essential \
@@ -15,30 +11,18 @@ RUN apt-get update && apt-get install -y \
     python3-pip \
     python3-setuptools \
     python3-wheel \
+    ca-certificates \
     curl \
-    wget \
     xz-utils \
     bzip2 \
     unzip \
-    ca-certificates \
-    file \
-    rsync \
-    libffi-dev \
     && rm -rf /var/lib/apt/lists/*
-
-# ============================================================
-# Meson
-# ============================================================
 
 RUN python3 -m pip install --no-cache-dir \
     "meson==1.4.2" \
     "tomli"
 
-RUN meson --version
-
-# ============================================================
-# Directories
-# ============================================================
+RUN meson --version && emcc --version
 
 WORKDIR /build
 
@@ -50,9 +34,9 @@ RUN mkdir -p \
     /build/qemu-src \
     /build/qemu-build
 
-# ============================================================
-# GLib 2.76.6
-# ============================================================
+# ------------------------------------------------------------
+# GLIB
+# ------------------------------------------------------------
 
 RUN git clone \
     --depth 1 \
@@ -62,10 +46,7 @@ RUN git clone \
 
 WORKDIR /build/glib-src
 
-# ============================================================
-# GLib -> WebAssembly cross compilation file
-# ============================================================
-
+# Tell Meson that Emscripten is the host.
 RUN cat > /build/glib-cross.txt <<'EOF'
 [binaries]
 c = 'emcc'
@@ -73,8 +54,7 @@ cpp = 'em++'
 ar = 'emar'
 strip = 'emstrip'
 ranlib = 'emranlib'
-pkgconfig = '/usr/bin/false'
-python = 'python3'
+pkg-config = '/usr/bin/false'
 
 [host_machine]
 system = 'emscripten'
@@ -84,28 +64,41 @@ endian = 'little'
 
 [properties]
 needs_exe_wrapper = true
+has_function_printf = true
 EOF
-
-# ============================================================
-# Download GLib subprojects
-# ============================================================
 
 RUN meson subprojects download
 
-# ============================================================
-# Show the libffi Meson file.
-# This is useful if GLib configuration reaches libffi.
-# ============================================================
+# ------------------------------------------------------------
+# PATCH GLIB'S BUNDLED LIBFFI
+#
+# GLib 2.76.6's bundled libffi does not recognize
+# Emscripten/wasm32 correctly.  We patch its Meson file so
+# it uses the generic wasm configuration.
+# ------------------------------------------------------------
 
-RUN echo "========================================" && \
-    echo " LIBFFI MESON.BUILD" && \
-    echo "========================================" && \
-    nl -ba /build/glib-src/subprojects/libffi/src/meson.build | head -120 && \
-    echo "========================================"
+RUN python3 - <<'PY'
+from pathlib import Path
 
-# ============================================================
-# Configure GLib
-# ============================================================
+p = Path("/build/glib-src/subprojects/libffi/meson.build")
+s = p.read_text()
+
+old = '''if host_system == 'emscripten'
+  if host_cpu_family == 'wasm32'
+    error('Unsupported pair: system "emscripten", cpu family "wasm32"')
+  endif
+endif
+'''
+
+if old in s:
+    s = s.replace(old, '')
+
+p.write_text(s)
+PY
+
+# ------------------------------------------------------------
+# BUILD GLIB
+# ------------------------------------------------------------
 
 RUN rm -rf /build/glib-build && \
     meson setup /build/glib-build \
@@ -117,35 +110,19 @@ RUN rm -rf /build/glib-build && \
       -Dman=false \
       -Dbsymbolic_functions=false \
       -Dglib_debug=disabled \
-      -Dforce_posix_threads=true
+      -Dforce_posix_threads=true \
+      -Dlibmount=disabled \
+      -Dselinux=disabled \
+      -Dxattr=false \
+      -Dlibelf=disabled
 
-# ============================================================
-# Build GLib
-# ============================================================
+RUN ninja -C /build/glib-build
 
-RUN meson compile \
-    -C /build/glib-build \
-    -j2
+RUN ninja -C /build/glib-build install
 
-# ============================================================
-# Install GLib
-# ============================================================
-
-RUN meson install \
-    -C /build/glib-build
-
-# ============================================================
-# Verify GLib installation
-# ============================================================
-
-RUN echo "========================================" && \
-    echo " GLIB SYSROOT" && \
-    echo "========================================" && \
-    find /build/sysroot -maxdepth 3 -type f | head -150
-
-# ============================================================
+# ------------------------------------------------------------
 # QEMU
-# ============================================================
+# ------------------------------------------------------------
 
 WORKDIR /build
 
@@ -157,81 +134,120 @@ RUN git clone \
 
 WORKDIR /build/qemu-src
 
-# ============================================================
-# QEMU configuration
-# ============================================================
-
-RUN mkdir -p /build/qemu-build
+# ------------------------------------------------------------
+# QEMU CONFIGURATION
+# ------------------------------------------------------------
 
 RUN ./configure \
     --static \
     --target-list=x86_64-softmmu \
     --cpu=wasm32 \
-    --disable-werror \
+    --disable-system \
+    --enable-system \
+    --disable-user \
+    --disable-linux-user \
+    --disable-bsd-user \
     --disable-docs \
+    --disable-tools \
+    --disable-plugins \
+    --disable-debug-info \
+    --disable-werror \
     --disable-gtk \
     --disable-sdl \
     --disable-opengl \
     --disable-vte \
-    --disable-curl \
+    --disable-curses \
+    --disable-spice \
+    --disable-vnc \
+    --disable-slirp \
     --disable-libssh \
     --disable-libnfs \
     --disable-libiscsi \
+    --disable-libusb \
+    --disable-usb-redir \
+    --disable-virglrenderer \
+    --disable-cap-ng \
+    --disable-seccomp \
+    --disable-libcap-ng \
+    --disable-pie \
+    --disable-fdt \
+    --disable-zstd \
     --disable-bzip2 \
     --disable-lzo \
     --disable-snappy \
-    --disable-zstd \
-    --disable-seccomp \
-    --disable-cap-ng \
-    --disable-brlapi \
-    --disable-libusb \
-    --disable-usb-redir \
-    --disable-spice \
-    --disable-vnc-jpeg \
-    --disable-vnc-png \
-    --disable-vnc-sasl \
-    --disable-xen \
+    --disable-coroutine-pool \
+    --disable-coroutine-tsan \
     --disable-kvm \
     --disable-hvf \
     --disable-whpx \
-    --disable-netmap \
-    --disable-vde \
-    --disable-virglrenderer \
-    --disable-linux-aio \
-    --disable-fdt \
-    --disable-pie \
+    --disable-tcg-interpreter \
     --enable-tcg \
-    --extra-cflags="-I/build/sysroot/include" \
-    --extra-ldflags="-L/build/sysroot/lib"
+    --enable-fdt=internal \
+    --with-sysroot=/build/sysroot
 
-# ============================================================
-# Build QEMU-Wasm
-# ============================================================
+# ------------------------------------------------------------
+# BUILD QEMU-WASM
+# ------------------------------------------------------------
 
-RUN emmake make -j2
+RUN emconfigure ./configure \
+    --static \
+    --target-list=x86_64-softmmu \
+    --cpu=wasm32 \
+    --disable-docs \
+    --disable-tools \
+    --disable-plugins \
+    --disable-debug-info \
+    --disable-werror \
+    --disable-gtk \
+    --disable-sdl \
+    --disable-opengl \
+    --disable-vte \
+    --disable-curses \
+    --disable-spice \
+    --disable-vnc \
+    --disable-slirp \
+    --disable-libssh \
+    --disable-libnfs \
+    --disable-libiscsi \
+    --disable-libusb \
+    --disable-usb-redir \
+    --disable-virglrenderer \
+    --disable-cap-ng \
+    --disable-seccomp \
+    --disable-libcap-ng \
+    --disable-pie \
+    --disable-kvm \
+    --disable-hvf \
+    --disable-whpx \
+    --disable-tcg-interpreter \
+    --enable-tcg \
+    --enable-fdt=internal \
+    --with-sysroot=/build/sysroot
 
-# ============================================================
-# Collect QEMU-Wasm output
-# ============================================================
+RUN emmake ninja -C build
+
+# ------------------------------------------------------------
+# COPY OUTPUT
+# ------------------------------------------------------------
 
 RUN mkdir -p /build/output/qemu && \
-    find /build/qemu-build \
+    find /build/qemu-src/build \
       -type f \
-      \( \
-        -name "*.js" \
-        -o -name "*.wasm" \
-        -o -name "*.worker.js" \
-        -o -name "*.data" \
-      \) \
+      \( -name 'qemu-system-x86_64' \
+      -o -name '*.wasm' \
+      -o -name '*.js' \
+      -o -name '*.worker.js' \) \
       -exec cp -v {} /build/output/qemu/ \;
 
-# ============================================================
-# Final report
-# ============================================================
+# ------------------------------------------------------------
+# FINAL OUTPUT
+# ------------------------------------------------------------
 
-RUN echo "" && \
-    echo "======================================" && \
+WORKDIR /build/output
+
+RUN echo "========================================" && \
     echo " QEMU-WASM BUILD COMPLETE" && \
-    echo "======================================" && \
-    echo "" && \
-    ls -lah /build/output/qemu
+    echo "========================================" && \
+    find /build/output/qemu -maxdepth 1 -type f -print
+
+CMD ["bash"]
