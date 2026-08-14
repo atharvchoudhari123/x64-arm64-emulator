@@ -108,8 +108,9 @@ RUN rm -rf /build/glib-build && \
       -Dlibmount=disabled \
       -Dselinux=disabled \
       -Dxattr=false \
-     -Dlibelf=disabled \
-      -Dsystemtap=false
+      -Dlibelf=disabled \
+      -Dsystemtap=false \
+      -Dgio_networking=false
 
 RUN meson compile -C /build/glib-build
 
