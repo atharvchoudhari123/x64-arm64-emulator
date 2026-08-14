@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "build:qemu": "bash scripts/build-qemu.sh",
+    "build": "bash scripts/build-qemu.sh",
     "serve": "python3 -m http.server 8080"
   }
 }
