@@ -2,6 +2,10 @@ FROM emscripten/emsdk:3.1.50
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+# ============================================================
+# BUILD DEPENDENCIES
+# ============================================================
+
 RUN apt-get update && apt-get install -y \
     git \
     build-essential \
@@ -11,7 +15,6 @@ RUN apt-get update && apt-get install -y \
     python3-pip \
     python3-setuptools \
     python3-wheel \
-    meson \
     gettext \
     libglib2.0-dev \
     libpixman-1-dev \
@@ -19,11 +22,16 @@ RUN apt-get update && apt-get install -y \
     libfdt-dev \
     && rm -rf /var/lib/apt/lists/*
 
+# Use a known-compatible Meson version.
 RUN python3 -m pip install --no-cache-dir \
     "meson==1.4.2" \
     "tomli"
 
 RUN meson --version && emcc --version
+
+# ============================================================
+# DIRECTORIES
+# ============================================================
 
 WORKDIR /build
 
@@ -47,7 +55,7 @@ RUN git clone \
 
 WORKDIR /build/glib-src
 
-# Download the GLib subprojects.
+# Download GLib subprojects.
 RUN meson subprojects download
 
 # Remove libffi fallback because the bundled libffi version
@@ -57,7 +65,10 @@ RUN rm -rf \
     subprojects/libffi-* \
     subprojects/libffi-*
 
-# Create a clean Meson cross file.
+# ============================================================
+# GLIB CROSS FILE
+# ============================================================
+
 RUN cat > /build/glib-cross.txt <<'EOF'
 [binaries]
 c = 'emcc'
@@ -78,21 +89,64 @@ needs_exe_wrapper = true
 skip_sanity_check = true
 EOF
 
-# Tell GLib not to use libffi.
+# ============================================================
+# PATCH GLIB FOR EMSCRIPTEN
+# ============================================================
+
+# Prevent GLib from requiring libffi.
 RUN python3 - <<'PY'
 from pathlib import Path
 
 p = Path("/build/glib-src/meson.build")
 s = p.read_text()
 
-# Prevent the bundled libffi fallback from being used.
-s = s.replace(
-    "dependency('libffi',",
-    "dependency('libffi', required: false,"
-)
+old = "dependency('libffi',"
+new = "dependency('libffi', required: false,"
+
+if old in s:
+    s = s.replace(old, new)
 
 p.write_text(s)
 PY
+
+# ------------------------------------------------------------
+# GLib's GIO build checks for the native res_query()
+# resolver API. Emscripten/WebAssembly does not provide
+# that native API, because networking is handled by the
+# browser environment.
+#
+# Skip this native-only check during cross compilation.
+# ------------------------------------------------------------
+
+RUN python3 - <<'PY'
+from pathlib import Path
+
+p = Path("/build/glib-src/gio/meson.build")
+s = p.read_text()
+
+old = """if not cc.has_function('res_query',
+    prefix: '#include <resolv.h>')
+  error('Could not find res_query()')
+endif
+"""
+
+new = """if not meson.is_cross_build() and not cc.has_function('res_query',
+    prefix: '#include <resolv.h>')
+  error('Could not find res_query()')
+endif
+"""
+
+if old not in s:
+    raise SystemExit(
+        "ERROR: Could not find the expected res_query() block in gio/meson.build"
+    )
+
+p.write_text(s.replace(old, new))
+PY
+
+# ============================================================
+# CONFIGURE GLIB
+# ============================================================
 
 RUN rm -rf /build/glib-build && \
     meson setup /build/glib-build \
@@ -109,10 +163,17 @@ RUN rm -rf /build/glib-build && \
       -Dselinux=disabled \
       -Dxattr=false \
       -Dlibelf=disabled \
-      -Dsystemtap=false \
-      -Dgio_networking=false
+      -Dsystemtap=false
+
+# ============================================================
+# BUILD GLIB
+# ============================================================
 
 RUN meson compile -C /build/glib-build
+
+# ============================================================
+# INSTALL GLIB
+# ============================================================
 
 RUN meson install -C /build/glib-build
 
@@ -130,14 +191,18 @@ RUN git clone \
 
 WORKDIR /build/qemu-src
 
-# Initialize only the QEMU submodules that are needed.
+# Initialize QEMU submodules.
 RUN git submodule update --init --recursive
+
+# ============================================================
+# QEMU BUILD DIRECTORY
+# ============================================================
+
+RUN mkdir -p /build/qemu-build
 
 # ============================================================
 # QEMU CONFIGURE
 # ============================================================
-
-RUN mkdir -p /build/qemu-build
 
 RUN /build/qemu-src/configure \
     --static \
@@ -199,7 +264,6 @@ RUN /build/qemu-src/configure \
     --disable-nettle \
     --disable-auth-pam \
     --disable-rbd \
-    --disable-libusb \
     --disable-pvrdma \
     --disable-coroutine-pool \
     --disable-membarrier \
@@ -214,7 +278,7 @@ RUN /build/qemu-src/configure \
 RUN emmake make -j2
 
 # ============================================================
-# INSTALL
+# INSTALL QEMU
 # ============================================================
 
 RUN emmake make install
@@ -255,5 +319,9 @@ RUN echo "========================================" && \
     echo "========================================" && \
     find /build/output/qemu -maxdepth 2 -type f -print && \
     echo "========================================"
+
+# ============================================================
+# DEFAULT CONTAINER COMMAND
+# ============================================================
 
 CMD ["bash"]
