@@ -1,0 +1,507 @@
+FROM emscripten/emsdk:3.1.50
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV EMSCRIPTEN=1
+
+# ============================================================
+# Native build tools
+# ============================================================
+
+RUN apt-get update && apt-get install -y \
+    git \
+    build-essential \
+    ninja-build \
+    pkg-config \
+    python3 \
+    python3-pip \
+    python3-setuptools \
+    python3-wheel \
+    curl \
+    wget \
+    xz-utils \
+    ca-certificates \
+    gettext \
+    && rm -rf /var/lib/apt/lists/*
+
+# QEMU 9.2.x requires a modern Meson.
+RUN python3 -m pip install --no-cache-dir \
+    "meson==1.5.0" \
+    "tomli"
+
+ENV PATH="/usr/local/bin:${PATH}"
+
+RUN meson --version
+
+WORKDIR /build
+
+# ============================================================
+# Versions
+# ============================================================
+
+ARG QEMU_VERSION=9.2.3
+ARG GLIB_VERSION=2.76.6
+
+# ============================================================
+# Directories
+# ============================================================
+
+RUN mkdir -p \
+    /build/output/qemu \
+    /build/sysroot \
+    /build/glib-src \
+    /build/glib-build
+
+# ============================================================
+# WebAssembly compiler environment
+# ============================================================
+
+ENV CC=emcc
+ENV CXX=em++
+ENV AR=emar
+ENV RANLIB=emranlib
+ENV LD=emcc
+
+ENV CFLAGS="-O3 -DEMSCRIPTEN"
+ENV CXXFLAGS="-O3 -DEMSCRIPTEN"
+ENV LDFLAGS="-sWASM_BIGINT=1 -sALLOW_MEMORY_GROWTH=1"
+
+# ============================================================
+# GLib source
+# ============================================================
+
+WORKDIR /build
+
+RUN git clone \
+    --depth 1 \
+    --branch ${GLIB_VERSION} \
+    https://github.com/GNOME/glib.git \
+    /build/glib-src
+
+WORKDIR /build/glib-src
+
+# ============================================================
+# GLib cross compilation file
+# ============================================================
+
+RUN cat > /build/glib-cross.txt <<'EOF'
+[binaries]
+c = 'emcc'
+cpp = 'em++'
+ar = 'emar'
+ranlib = 'emranlib'
+strip = 'emstrip'
+pkg-config = 'false'
+
+[host_machine]
+system = 'emscripten'
+cpu_family = 'wasm32'
+cpu = 'wasm32'
+endian = 'little'
+
+[properties]
+needs_exe_wrapper = true
+EOF
+
+# ============================================================
+# Download GLib subprojects
+# ============================================================
+
+RUN meson subprojects download
+
+# ============================================================
+# Fix bundled libffi for Emscripten + Meson 1.5
+# ============================================================
+
+RUN python3 - <<'PY'
+from pathlib import Path
+import re
+
+root = Path("/build/glib-src/subprojects/libffi")
+meson_file = root / "meson.build"
+include_file = root / "include" / "meson.build"
+src_file = root / "src" / "meson.build"
+
+print("======================================")
+print(" Fixing bundled libffi")
+print("======================================")
+
+if not meson_file.exists():
+    raise SystemExit(f"libffi meson.build not found: {meson_file}")
+
+if not include_file.exists():
+    raise SystemExit(f"libffi include/meson.build not found: {include_file}")
+
+if not src_file.exists():
+    raise SystemExit(f"libffi src/meson.build not found: {src_file}")
+
+text = meson_file.read_text()
+
+# ------------------------------------------------------------
+# 1. Replace TARGET validation block
+# ------------------------------------------------------------
+
+pattern = re.compile(
+    r"(?ms)^if\s+TARGET\s*==\s*['\"]['\"]\s*\n"
+    r".*?"
+    r"^endif\s*$"
+)
+
+matches = list(pattern.finditer(text))
+
+if matches:
+    print(f"Found {len(matches)} TARGET validation block(s).")
+
+    replacement = (
+        "if TARGET == ''\n"
+        "  message('Using generic libffi configuration for Emscripten/wasm32')\n"
+        "endif"
+    )
+
+    match = matches[-1]
+
+    text = (
+        text[:match.start()]
+        + replacement
+        + text[match.end():]
+    )
+
+    print("Replaced libffi TARGET validation block.")
+else:
+    print("TARGET validation block not found.")
+
+# ------------------------------------------------------------
+# 2. Remove malformed duplicate parentheses
+# ------------------------------------------------------------
+
+text = re.sub(
+    r"(message\s*\(\s*['\"][^\n]*Emscripten/wasm32[^\n]*['\"])\)+",
+    r"\1)",
+    text,
+)
+
+# ------------------------------------------------------------
+# 3. Ensure Emscripten uses generic Unix configuration
+# ------------------------------------------------------------
+
+if "host_machine.system() == 'emscripten'" not in text:
+
+    old_blocks = [
+        """if host_machine.system() == 'darwin'
+  ffi_os = 'darwin'
+elif host_machine.system() == 'windows'
+  ffi_os = 'win32'
+else
+  ffi_os = 'unix'
+endif""",
+
+        """if host_machine.system() == 'darwin'
+    ffi_os = 'darwin'
+elif host_machine.system() == 'windows'
+    ffi_os = 'win32'
+else
+    ffi_os = 'unix'
+endif""",
+    ]
+
+    new_block = """if host_machine.system() == 'emscripten'
+  ffi_os = 'unix'
+elif host_machine.system() == 'darwin'
+  ffi_os = 'darwin'
+elif host_machine.system() == 'windows'
+  ffi_os = 'win32'
+else
+  ffi_os = 'unix'
+endif"""
+
+    for old in old_blocks:
+        if old in text:
+            text = text.replace(old, new_block)
+            print("Added Emscripten ffi_os configuration.")
+            break
+
+meson_file.write_text(text)
+
+# ------------------------------------------------------------
+# 4. Fix libffi architecture include directory
+# ------------------------------------------------------------
+
+inc = include_file.read_text()
+
+if re.search(r"(?m)^\s*arch_subdir\s*=", inc):
+    inc = re.sub(
+        r"(?m)^\s*arch_subdir\s*=.*$",
+        "arch_subdir = ''",
+        inc,
+    )
+    print("Normalized arch_subdir.")
+else:
+    inc = "arch_subdir = ''\n" + inc
+    print("Added arch_subdir = ''.")
+
+include_file.write_text(inc)
+
+# ------------------------------------------------------------
+# 5. Fix libffi c_sources for Emscripten
+#
+# libffi's architecture-specific Meson logic does not provide
+# c_sources for wasm32. Define the generic source list before
+# src/meson.build uses it.
+# ------------------------------------------------------------
+
+src = src_file.read_text()
+
+if "c_sources =" not in src:
+
+    generic_sources = """c_sources = files(
+  'closures.c',
+  'prep_cif.c',
+  'raw_api.c',
+  'types.c',
+  'ffi.c',
+)
+
+"""
+
+    src = generic_sources + src
+    src_file.write_text(src)
+
+    print("Added generic libffi c_sources for Emscripten/wasm32.")
+else:
+    print("libffi c_sources already defined.")
+
+# ------------------------------------------------------------
+# 6. Verify resulting Meson files
+# ------------------------------------------------------------
+
+print()
+print("======================================")
+print(" libffi patch verification")
+print("======================================")
+
+for i, line in enumerate(meson_file.read_text().splitlines(), 1):
+    if (
+        "TARGET ==" in line
+        or "Emscripten/wasm32" in line
+        or "ffi_os" in line
+    ):
+        print(f"{i}: {line}")
+
+print()
+
+for i, line in enumerate(include_file.read_text().splitlines(), 1):
+    if "arch_subdir" in line:
+        print(f"include/meson.build:{i}: {line}")
+
+print()
+
+for i, line in enumerate(src_file.read_text().splitlines(), 1):
+    if "c_sources" in line:
+        print(f"src/meson.build:{i}: {line}")
+
+# Make sure the known malformed form doesn't exist.
+if "configuration'))" in meson_file.read_text():
+    raise SystemExit(
+        "ERROR: malformed double-parenthesis message still exists."
+    )
+
+print()
+print("libffi patch completed successfully.")
+PY
+
+# ============================================================
+# Configure GLib
+# ============================================================
+
+RUN rm -rf /build/glib-build && \
+    meson setup /build/glib-build \
+      --cross-file /build/glib-cross.txt \
+      --prefix=/build/sysroot \
+      --libdir=lib \
+      -Dtests=false \
+      -Dinstalled_tests=false \
+      -Dman=false \
+      -Dbsymbolic_functions=false \
+      -Dglib_debug=disabled \
+      -Dforce_posix_threads=true
+
+# ============================================================
+# Build GLib
+# ============================================================
+
+RUN meson compile -C /build/glib-build
+
+# ============================================================
+# Install GLib
+# ============================================================
+
+RUN meson install -C /build/glib-build
+
+# ============================================================
+# pkg-config
+# ============================================================
+
+ENV PKG_CONFIG="/usr/bin/pkg-config"
+
+ENV PKG_CONFIG_PATH="/build/sysroot/lib/pkgconfig:/build/sysroot/share/pkgconfig"
+
+ENV PKG_CONFIG_LIBDIR="/build/sysroot/lib/pkgconfig:/build/sysroot/share/pkgconfig"
+
+# ============================================================
+# Download QEMU
+# ============================================================
+
+WORKDIR /build
+
+RUN git clone \
+    --depth 1 \
+    --branch v${QEMU_VERSION} \
+    https://github.com/qemu/qemu.git \
+    /build/qemu
+
+WORKDIR /build/qemu
+
+# ============================================================
+# Copy QEMU configuration script
+# ============================================================
+
+COPY scripts/configure-qemu.sh /build/configure-qemu.sh
+
+# ============================================================
+# Patch QEMU host OS detection
+# ============================================================
+
+RUN python3 - <<'PY'
+from pathlib import Path
+
+p = Path("/build/qemu/configure")
+s = p.read_text()
+
+marker = 'error_exit "Unrecognized host OS (uname -s reports'
+
+pos = s.find(marker)
+
+if pos == -1:
+    print("QEMU host OS error check already absent/patched.")
+else:
+    start = s.rfind("if test", 0, pos)
+    end = s.find("\nfi", pos)
+
+    if start == -1 or end == -1:
+        raise SystemExit(
+            "Could not safely locate QEMU host OS check."
+        )
+
+    end += 3
+
+    replacement = """if test "$host_os" = "bogus"; then
+    host_os="linux"
+fi"""
+
+    s = s[:start] + replacement + s[end:]
+    p.write_text(s)
+
+    print("QEMU host OS detection patched.")
+PY
+
+# ============================================================
+# Patch QEMU compiler version check
+# ============================================================
+
+RUN python3 - <<'PY'
+from pathlib import Path
+
+p = Path("/build/qemu/meson.build")
+s = p.read_text()
+
+needle = (
+    "You either need GCC v7.4 or Clang v10.0 "
+    "(or XCode Clang v15.0) to compile QEMU"
+)
+
+if needle not in s:
+    print("QEMU compiler version check not found; continuing.")
+else:
+    old = "error('" + needle + "')"
+
+    if old in s:
+        new = (
+            "message('Emscripten compiler detected; "
+            "skipping native compiler version check')"
+        )
+
+        s = s.replace(old, new)
+        p.write_text(s)
+
+        print("QEMU compiler version check patched.")
+    else:
+        print(
+            "Compiler version text exists but is not an exact "
+            "error() expression; leaving it unchanged."
+        )
+PY
+
+# ============================================================
+# QEMU Meson cross compilation file
+# ============================================================
+
+RUN cat > /build/qemu/emscripten-cross.txt <<'EOF'
+[binaries]
+c = 'emcc'
+cpp = 'em++'
+ar = 'emar'
+ranlib = 'emranlib'
+strip = 'emstrip'
+pkg-config = '/usr/bin/pkg-config'
+
+[host_machine]
+system = 'emscripten'
+cpu_family = 'wasm32'
+cpu = 'wasm32'
+endian = 'little'
+
+[properties]
+needs_exe_wrapper = true
+EOF
+
+# ============================================================
+# Configure QEMU
+# ============================================================
+
+RUN chmod +x /build/configure-qemu.sh && \
+    /build/configure-qemu.sh
+
+# ============================================================
+# Build QEMU
+# ============================================================
+
+RUN emmake ninja -C build
+
+# ============================================================
+# Collect WebAssembly output
+# ============================================================
+
+RUN mkdir -p /build/output/qemu && \
+    find build -type f \
+      \( \
+        -name "*.js" \
+        -o -name "*.wasm" \
+        -o -name "*.worker.js" \
+        -o -name "*.data" \
+      \) \
+      -exec cp {} /build/output/qemu/ \; || true
+
+# ============================================================
+# Verify WebAssembly output
+# ============================================================
+
+RUN echo "======================================" && \
+    echo " QEMU-Wasm build output" && \
+    echo "======================================" && \
+    find /build/output/qemu -maxdepth 1 -type f -print && \
+    echo && \
+    if find /build/output/qemu -type f -name "*.wasm" -print -quit | grep -q .; then \
+        echo "SUCCESS: WebAssembly output found."; \
+    else \
+        echo "ERROR: No WebAssembly output was produced."; \
+        exit 1; \
+    fi
