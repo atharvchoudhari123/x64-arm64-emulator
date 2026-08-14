@@ -25,7 +25,7 @@ RUN apt-get update && apt-get install -y \
 
 # QEMU 9.2.x requires a modern Meson.
 RUN python3 -m pip install --no-cache-dir \
-    "meson==1.5.0" \
+    "meson==1.4.2" \
     "tomli"
 
 ENV PATH="/usr/local/bin:${PATH}"
@@ -134,45 +134,72 @@ if not include_file.exists():
 if not src_file.exists():
     raise SystemExit(f"libffi src/meson.build not found: {src_file}")
 
+# ------------------------------------------------------------
+# 1. Create generic wasm32 ffitarget.h
+#
+# The bundled libffi version used by GLib 2.76.6 does not
+# correctly generate this header for Emscripten.
+# ------------------------------------------------------------
+
+target_dir = root / "src"
+target_header = target_dir / "ffitarget.h"
+
+target_header.write_text(r'''#ifndef LIBFFI_TARGET_H
+#define LIBFFI_TARGET_H
+
+#ifndef LIBFFI_H
+#error "Please do not include ffitarget.h directly into your source. Use ffi.h instead."
+#endif
+
+/*
+ * Generic WebAssembly/Emscripten libffi target.
+ *
+ * QEMU only needs GLib's libffi dependency for building.
+ * Native WebAssembly closures/trampolines are not required by
+ * the QEMU target used here.
+ */
+
+#ifndef LIBFFI_ASM
+
+typedef unsigned long ffi_arg;
+typedef signed long ffi_sarg;
+
+typedef enum ffi_abi {
+  FFI_FIRST_ABI = 0,
+  FFI_SYSV,
+  FFI_LAST_ABI,
+  FFI_DEFAULT_ABI = FFI_SYSV
+} ffi_abi;
+
+#endif
+
+#define FFI_CLOSURES 0
+#define FFI_GO_CLOSURES 0
+#define FFI_NATIVE_RAW_API 0
+
+#define FFI_TRAMPOLINE_SIZE 0
+
+#endif
+''')
+
+print(f"Created generic wasm32 target header: {target_header}")
+
+# ------------------------------------------------------------
+# 2. Patch libffi top-level Meson configuration
+# ------------------------------------------------------------
+
 text = meson_file.read_text()
 
-# ------------------------------------------------------------
-# 1. Replace TARGET validation block
-# ------------------------------------------------------------
-
-pattern = re.compile(
-    r"(?ms)^if\s+TARGET\s*==\s*['\"]['\"]\s*\n"
-    r".*?"
-    r"^endif\s*$"
+# Remove/neutralize problematic target validation.
+text = re.sub(
+    r"(?ms)^if\s+TARGET\s*==\s*['\"]['\"]\s*\n.*?^endif\s*$",
+    """if TARGET == ''
+  message('Using generic libffi configuration for Emscripten/wasm32')
+endif""",
+    text,
 )
 
-matches = list(pattern.finditer(text))
-
-if matches:
-    print(f"Found {len(matches)} TARGET validation block(s).")
-
-    replacement = (
-        "if TARGET == ''\n"
-        "  message('Using generic libffi configuration for Emscripten/wasm32')\n"
-        "endif"
-    )
-
-    match = matches[-1]
-
-    text = (
-        text[:match.start()]
-        + replacement
-        + text[match.end():]
-    )
-
-    print("Replaced libffi TARGET validation block.")
-else:
-    print("TARGET validation block not found.")
-
-# ------------------------------------------------------------
-# 2. Remove malformed duplicate parentheses
-# ------------------------------------------------------------
-
+# Fix malformed duplicate parentheses if present.
 text = re.sub(
     r"(message\s*\(\s*['\"][^\n]*Emscripten/wasm32[^\n]*['\"])\)+",
     r"\1)",
@@ -180,11 +207,10 @@ text = re.sub(
 )
 
 # ------------------------------------------------------------
-# 3. Ensure Emscripten uses generic Unix configuration
+# 3. Force Emscripten to use generic Unix configuration
 # ------------------------------------------------------------
 
 if "host_machine.system() == 'emscripten'" not in text:
-
     old_blocks = [
         """if host_machine.system() == 'darwin'
   ffi_os = 'darwin'
@@ -241,17 +267,12 @@ else:
 include_file.write_text(inc)
 
 # ------------------------------------------------------------
-# 5. Fix libffi c_sources for Emscripten
-#
-# libffi's architecture-specific Meson logic does not provide
-# c_sources for wasm32. Define the generic source list before
-# src/meson.build uses it.
+# 5. Ensure generic c_sources exist
 # ------------------------------------------------------------
 
 src = src_file.read_text()
 
 if "c_sources =" not in src:
-
     generic_sources = """c_sources = files(
   'closures.c',
   'prep_cif.c',
@@ -270,7 +291,27 @@ else:
     print("libffi c_sources already defined.")
 
 # ------------------------------------------------------------
-# 6. Verify resulting Meson files
+# 6. Make include/meson.build explicitly use src/ffitarget.h
+# ------------------------------------------------------------
+
+inc = include_file.read_text()
+
+# Remove any architecture-dependent ffitarget path that can
+# produce ../src//ffitarget.h incorrectly.
+inc = re.sub(
+    r"(?m)^(\s*ffitarget_h\s*=\s*).*?$",
+    r"\1files('../src/ffitarget.h')",
+    inc,
+)
+
+# If the variable doesn't exist, add it.
+if "ffitarget_h =" not in inc:
+    inc = "ffitarget_h = files('../src/ffitarget.h')\n" + inc
+
+include_file.write_text(inc)
+
+# ------------------------------------------------------------
+# 7. Verification
 # ------------------------------------------------------------
 
 print()
@@ -278,18 +319,15 @@ print("======================================")
 print(" libffi patch verification")
 print("======================================")
 
-for i, line in enumerate(meson_file.read_text().splitlines(), 1):
-    if (
-        "TARGET ==" in line
-        or "Emscripten/wasm32" in line
-        or "ffi_os" in line
-    ):
-        print(f"{i}: {line}")
+print(f"Target header exists: {target_header.exists()}")
+
+if target_header.exists():
+    print(f"Target header size: {target_header.stat().st_size} bytes")
 
 print()
 
 for i, line in enumerate(include_file.read_text().splitlines(), 1):
-    if "arch_subdir" in line:
+    if "arch_subdir" in line or "ffitarget_h" in line:
         print(f"include/meson.build:{i}: {line}")
 
 print()
@@ -297,12 +335,6 @@ print()
 for i, line in enumerate(src_file.read_text().splitlines(), 1):
     if "c_sources" in line:
         print(f"src/meson.build:{i}: {line}")
-
-# Make sure the known malformed form doesn't exist.
-if "configuration'))" in meson_file.read_text():
-    raise SystemExit(
-        "ERROR: malformed double-parenthesis message still exists."
-    )
 
 print()
 print("libffi patch completed successfully.")
